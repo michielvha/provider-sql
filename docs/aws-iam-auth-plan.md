@@ -10,9 +10,27 @@ The Crossplane provider-sql currently only supports static username/password aut
 - PR #166: Azure AD auth for MSSQL (open/stale, uses secret-key detection approach, never formally reviewed)
 - Issue #165: Azure AD auth for MSSQL
 - Issue #196: Entra ID for Azure PostgreSQL (maintainer chlunde asked about scope separation)
-- No existing issue for AWS IAM auth yet
+- Issue #347: **this work** — AWS IAM DB auth (authored by michielvha). Maintainer `kkendzia` responded positively ("I like this and we would appreciate a contribution") with one caveat: enabling IAM auth requires an initial password connection to modify the DB (`GRANT rds_iam`), so password access is a bootstrapping prerequisite.
+- Issue #393: pluggable HTTP credential-helper source for the **master** user (authored by giepa). Explicitly complementary to #347, not competing — see Issue Landscape below.
+- Issue #106 (CLOSED/completed): earlier "Support RDS IAM authentication" request. Thread shows IAM-authed *user creation* is already achievable via the existing `Role` + `Grant` resources (tenitski's working example), and the `rds_iam` underscore-naming snag was resolved by external-name support (#261). The **provider-authentication** half — connecting via an IAM token — was never delivered. That gap is what this PR fills.
 
-**Scope:** This PR covers **provider authentication only** — how the provider connects to Aurora. Creating IAM-authenticated database users (`GRANT rds_iam TO myuser` for PG, `IDENTIFIED WITH AWSAuthenticationPlugin` for MySQL) is a separate follow-up PR, per maintainer preference on #196.
+**Scope:** This PR covers **provider authentication only** — how the provider connects to Aurora. Creating IAM-authenticated database users (`GRANT rds_iam TO myuser` for PG, `IDENTIFIED WITH AWSAuthenticationPlugin` for MySQL) is a separate follow-up PR, per maintainer preference on #196, and is **already largely possible today** via existing `Role`/`Grant` resources (see #106).
+
+---
+
+## Issue Landscape & Maintainer Signal
+
+**Where this stands (as of analysis):**
+
+- **#347 is endorsed.** Maintainer `kkendzia` invited the contribution. The only design note is the bootstrapping prerequisite (below), which is an operator/runbook concern, not a provider code path.
+- **#347 and #393 are complementary.** #393 (giepa) adds an HTTP credential-helper for the *master* user; #347 issues IAM tokens for an already-IAM-configured provisioning user. A `ProviderConfig` picks whichever fits its connecting user. giepa explicitly offered to coordinate naming/structure — worth a courtesy sync, but the two features touch the same extension point (`ProviderCredentials.Source`) without colliding.
+- **#106 backs the scoping.** User-creation is already solved via existing resources; provider-auth is the missing piece. This is the strongest justification for the "provider auth only" scope when reviewers ask "why not also create the users?"
+
+**Critical prerequisite — do NOT IAM-enable the RDS master user.** Per giepa's analysis on #393:
+- Postgres: `GRANT rds_iam` to a role **permanently disables password auth** for it. Doing this to the master breaks AWS-managed rotation, snapshot restore, and break-glass.
+- MySQL: `AWSAuthenticationPlugin` is fixed at `CREATE USER` time — no conversion path for the master.
+
+Therefore the provider must connect as a **dedicated provisioning role** (e.g. `crossplane_admin`) that is granted `rds_iam` **plus** the privileges needed to manage databases/roles/grants — never as the RDS master. This is a one-time operator setup (requires a password connection to create+grant the role), and must be documented prominently in the examples and README. The provider itself never performs this bootstrap.
 
 ---
 
@@ -60,6 +78,13 @@ The `newDB` function signatures remain **unchanged**:
 - PostgreSQL: `New(creds map[string][]byte, database, sslmode string) xsql.DB`
 
 Instead, **before** calling `newDB`, the Connect() method injects the generated IAM token into `creds[password]`. The client layer never knows about IAM — it just sees a password. This minimizes blast radius.
+
+> **Injection point moved (#362 SecretKeyMapping merged).** The cluster reconcilers no longer pass `s.Data` straight to `newDB`. They now remap first:
+> ```go
+> secretData := xsql.RemapCredentialKeys(s.Data, pc.Spec.Credentials.SecretKeyMapping.ToMap())
+> return &external{db: c.newDB(secretData, tlsName, ...)}, nil
+> ```
+> Token injection must therefore run **on `secretData` after the remap**, not on `s.Data`. Verified present in e.g. `pkg/controller/cluster/mysql/database/reconciler.go:133`. The namespaced path is unaffected (injection happens centrally in `provider.go` — see step 4).
 
 For namespaced controllers, token injection happens in the centralized `provider.GetProviderConfig()` helper, meaning **zero changes** to the 9 individual namespaced reconciler files.
 
@@ -125,17 +150,18 @@ In each cluster reconciler's `Connect()` method, after fetching the secret and b
 - `pkg/controller/cluster/mysql/user/reconciler.go`
 - `pkg/controller/cluster/mysql/grant/reconciler.go`
 
-Pattern:
+Pattern (note: operate on `secretData` **after** `RemapCredentialKeys`, before `newDB`):
 ```go
-// After fetching secret s, before calling newDB:
+secretData := xsql.RemapCredentialKeys(s.Data, pc.Spec.Credentials.SecretKeyMapping.ToMap())
 if pc.Spec.Credentials.Source == v1alpha1.CredentialsSourceAWSIAMAuth {
-    region := awsiam.ResolveRegion(pc.Spec.Credentials.Region, s.Data)
-    if err := awsiam.InjectToken(ctx, s.Data, region); err != nil {
+    region := awsiam.ResolveRegion(pc.Spec.Credentials.Region, secretData)
+    if err := awsiam.InjectToken(ctx, secretData, region); err != nil {
         return nil, errors.Wrap(err, errGenerateIAMToken)
     }
     forceTLS := "true"
     tlsName = &forceTLS  // Force TLS for IAM auth
 }
+return &external{db: c.newDB(secretData, tlsName, mg.Spec.ForProvider.BinLog)}, nil
 ```
 
 **PostgreSQL reconcilers** (6 files):
@@ -146,11 +172,12 @@ if pc.Spec.Credentials.Source == v1alpha1.CredentialsSourceAWSIAMAuth {
 - `pkg/controller/cluster/postgresql/schema/reconciler.go`
 - `pkg/controller/cluster/postgresql/default_privileges/reconciler.go`
 
-Pattern:
+Pattern (operate on `secretData` after `RemapCredentialKeys`):
 ```go
+secretData := xsql.RemapCredentialKeys(s.Data, pc.Spec.Credentials.SecretKeyMapping.ToMap())
 if pc.Spec.Credentials.Source == v1alpha1.CredentialsSourceAWSIAMAuth {
-    region := awsiam.ResolveRegion(pc.Spec.Credentials.Region, s.Data)
-    if err := awsiam.InjectToken(ctx, s.Data, region); err != nil {
+    region := awsiam.ResolveRegion(pc.Spec.Credentials.Region, secretData)
+    if err := awsiam.InjectToken(ctx, secretData, region); err != nil {
         return nil, errors.Wrap(err, errGenerateIAMToken)
     }
     sslMode := "require"
@@ -243,11 +270,13 @@ spec:
 1. `make reviewable` — must pass (lint, generate, test)
 2. Unit tests for `pkg/clients/awsiam/` package
 3. Manual testing with an actual Aurora cluster:
-   - Enable IAM auth on Aurora
-   - Create IAM DB user
-   - Configure EKS Pod Identity / IRSA
+   - Enable IAM auth on the Aurora cluster
+   - **Bootstrap (one-time, password connection):** create a dedicated provisioning role (NOT the master), grant it `rds_iam` (PG) / create with `AWSAuthenticationPlugin` (MySQL), plus the privileges needed to manage databases/roles/grants
+   - Map an IAM role/policy (`rds-db:connect`) to that DB user
+   - Configure EKS Pod Identity / IRSA on the provider's ServiceAccount
+   - Create a connection Secret with `endpoint`, `port`, `username` (the provisioning role) — no password
    - Create ProviderConfig with `source: AWSIAMAuth`
-   - Verify provider can create/manage databases
+   - Verify provider can create/manage databases, and that token regeneration works across reconciles (>15 min)
 
 ---
 
