@@ -649,6 +649,7 @@ integration_tests_postgres() {
   check_extension_test
   delete_extension_test
   if [[ "${TLS}" == "true" ]]; then
+    check_postgres_ca_admission
     check_postgres_ca_rotation
     check_postgres_verification_modes
     check_postgres_default_privileges_ca
@@ -882,5 +883,58 @@ EOFPRIVILEGES
   local resource="defaultprivileges.postgresql.sql.${APIGROUP_SUFFIX}crossplane.io/ca-default-privileges"
   "${KUBECTL}" wait "${resource}" --for=condition=Ready --timeout=90s
   "${KUBECTL}" delete "${resource}" --timeout=90s
+  echo_step_completed
+}
+
+# Check admission on the generated CRDs, including defaulting before CEL validation.
+check_postgres_ca_admission() {
+  echo_step "check PostgreSQL CA selector admission and sslMode defaulting"
+  local kind source sample mode has_ca selector_namespace manifest result rejected count=0
+  local kinds="ProviderConfig"
+  if [[ "${API_TYPE}" == "namespaced" ]]; then
+    kinds="ProviderConfig ClusterProviderConfig"
+  fi
+  for kind in ${kinds}; do
+    selector_namespace=default
+    if [[ "${API_TYPE}" == "namespaced" && "${kind}" == "ProviderConfig" ]]; then
+      selector_namespace=""
+    fi
+    for source in PostgreSQLConnectionSecret AWSIAMAuth; do
+      for sample in omitted verify-ca verify-full require disable require-no-ca disable-no-ca; do
+        mode=${sample%-no-ca}
+        has_ca=true
+        rejected=false
+        if [[ "${sample}" == *-no-ca ]]; then
+          has_ca=false
+        elif [[ "${mode}" == "require" || "${mode}" == "disable" ]]; then
+          rejected=true
+        fi
+        manifest=$(jq -n \
+          --arg api "postgresql.sql.${APIGROUP_SUFFIX}crossplane.io/v1alpha1" \
+          --arg kind "${kind}" --arg source "${source}" --arg mode "${mode}" \
+          --arg ns "${selector_namespace}" --argjson ca "${has_ca}" '
+          {apiVersion: $api, kind: $kind, metadata: {name: "e2e-ca-admission"},
+           spec: {credentials: {source: $source, connectionSecretRef: {name: "unused"}}}}
+          | if $ns == "" then .metadata.namespace = "default"
+            else .spec.credentials.connectionSecretRef.namespace = $ns end
+          | if $mode == "omitted" then . else .spec.sslMode = $mode end
+          | if $ca then .spec.tlsConfig.caCert.secretRef = {name: "unused", key: "bundle"}
+            | if $ns == "" then . else .spec.tlsConfig.caCert.secretRef.namespace = $ns end
+            else . end')
+        if result=$(printf '%s\n' "${manifest}" | "${KUBECTL}" create --dry-run=server -f - -o json 2>&1); then
+          if [[ "${rejected}" == "true" ]]; then
+            echo_error "${kind} accepted ${source} with a CA and sslMode=${mode}"
+          fi
+          if [[ "${mode}" == "omitted" && $(jq -r '.spec.sslMode' <<<"${result}") != "verify-full" ]]; then
+            echo_error "${kind} did not default sslMode to verify-full"
+          fi
+        elif [[ "${rejected}" != "true" || "${result}" != *"tlsConfig requires sslMode verify-ca or verify-full"* ]]; then
+          echo_error "Unexpected PostgreSQL admission failure for ${kind}/${source}/${sample}: ${result}"
+        fi
+        count=$((count + 1))
+      done
+    done
+  done
+  echo_info "${count} PostgreSQL admission cases passed"
   echo_step_completed
 }

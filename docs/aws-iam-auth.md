@@ -115,7 +115,9 @@ spec:
 ClusterProviderConfigs use an explicit Secret namespace, as in the first example.
 The same CA selector works with password authentication. PostgreSQL CA selectors
 require `verify-ca` or `verify-full`; other modes are rejected when a selector is
-present. `verify-ca` verifies the certificate chain; `verify-full` also verifies
+present. This also applies to IAM: `sslMode: require` with `tlsConfig` is invalid;
+use `verify-full` (the default) or `verify-ca` instead. `verify-ca` verifies the
+certificate chain; `verify-full` also verifies
 the endpoint hostname.
 
 Use `verify-full` for IAM authentication with the actual RDS endpoint hostname.

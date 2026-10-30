@@ -36,10 +36,9 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	"github.com/crossplane-contrib/provider-sql/apis/cluster/mysql/v1alpha1"
-	"github.com/crossplane-contrib/provider-sql/pkg/clients/awsiam"
 	"github.com/crossplane-contrib/provider-sql/pkg/clients/mysql"
 	"github.com/crossplane-contrib/provider-sql/pkg/clients/xsql"
-	"github.com/crossplane-contrib/provider-sql/pkg/controller/cluster/mysql/tls"
+	"github.com/crossplane-contrib/provider-sql/pkg/controller/cluster/mysql/connect"
 )
 
 const (
@@ -47,9 +46,6 @@ const (
 	errGetPC        = "cannot get ProviderConfig"
 	errNoSecretRef  = "ProviderConfig does not reference a credentials Secret"
 	errGetSecret    = "cannot get credentials Secret"
-	errTLSConfig    = "cannot load TLS config"
-
-	errGenerateIAMToken = "cannot generate AWS IAM authentication token"
 
 	errSelectDB = "cannot select database"
 	errCreateDB = "cannot create database"
@@ -94,10 +90,6 @@ func Setup(mgr ctrl.Manager, o xpcontroller.Options) error {
 		Complete(r)
 }
 
-// newIAMToken prepares a token provider used for every physical connection.
-// Tests replace this factory to avoid AWS access.
-var newIAMToken = awsiam.NewTokenProvider
-
 type connector struct {
 	kube  client.Client
 	track func(ctx context.Context, mg resource.LegacyManaged) error
@@ -130,25 +122,12 @@ func (c *connector) Connect(ctx context.Context, mg *v1alpha1.Database) (managed
 		return nil, errors.Wrap(err, errGetSecret)
 	}
 
-	tlsName, err := tls.LoadConfig(ctx, c.kube, providerConfigName, pc.Spec.TLS, pc.Spec.TLSConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, errTLSConfig)
-	}
-
 	secretData := xsql.RemapCredentialKeys(s.Data, pc.Spec.Credentials.SecretKeyMapping.ToMap())
-
-	cleartext := false
-	var password xsql.PasswordProvider
-	if pc.Spec.Credentials.Source == v1alpha1.CredentialsSourceAWSIAMAuth {
-		var err error
-		password, err = newIAMToken(ctx, pc.Spec.Credentials.Region, secretData)
-		if err != nil {
-			return nil, errors.Wrap(err, errGenerateIAMToken)
-		}
-		cleartext = true
-		// Default IAM connections to verified TLS using the configured trust roots.
-		tlsName = mysql.EnsureTLS(tlsName)
+	tlsName, cleartext, password, err := connect.Configure(ctx, c.kube, pc, secretData)
+	if err != nil {
+		return nil, err
 	}
+
 	return &external{db: c.newDB(secretData, tlsName, mg.Spec.ForProvider.BinLog, cleartext, password)}, nil
 }
 

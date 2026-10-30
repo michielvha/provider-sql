@@ -19,6 +19,8 @@ package database
 import (
 	"context"
 	"database/sql"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/crossplane-contrib/provider-sql/apis/cluster/mysql/v1alpha1"
@@ -66,12 +68,14 @@ func TestConnect(t *testing.T) {
 	errBoom := errors.New("boom")
 	nopUsage := func(ctx context.Context, mg resource.LegacyManaged) error { return nil }
 
-	// Stub the AWS IAM token injection so the success case needs no AWS access.
-	origInject := newIAMToken
-	newIAMToken = func(_ context.Context, _ *string, creds map[string][]byte) (xsql.PasswordProvider, error) {
-		return func(context.Context) (string, error) { return "iam-token", nil }, nil
+	for key, value := range map[string]string{
+		"AWS_ACCESS_KEY_ID": "SYNTHETIC-TEST-KEY", "AWS_SECRET_ACCESS_KEY": "synthetic-test-secret",
+		"AWS_SESSION_TOKEN": "synthetic-session", "AWS_REGION": "eu-central-1", "AWS_EC2_METADATA_DISABLED": "true",
+		"AWS_CONFIG_FILE": os.DevNull, "AWS_SHARED_CREDENTIALS_FILE": os.DevNull,
+		"AWS_PROFILE": "", "AWS_DEFAULT_PROFILE": "",
+	} {
+		t.Setenv(key, value)
 	}
-	defer func() { newIAMToken = origInject }()
 
 	type fields struct {
 		kube  client.Client
@@ -195,7 +199,7 @@ func TestConnect(t *testing.T) {
 					if password == nil {
 						t.Fatal("missing per-connection password provider")
 					}
-					if got, err := password(context.Background()); err != nil || got != "iam-token" {
+					if got, err := password(context.Background()); err != nil || !strings.Contains(got, "X-Amz-Signature=") {
 						t.Errorf("token: %q, %v", got, err)
 					}
 					if _, ok := creds[xpv2.CredentialsSecretPasswordKey]; ok {
@@ -223,6 +227,9 @@ func TestConnect(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := &connector{kube: tc.fields.kube, track: tc.fields.track, newDB: tc.fields.newDB}
+			if tc.args.ctx == nil {
+				tc.args.ctx = context.Background()
+			}
 			_, err := e.Connect(tc.args.ctx, tc.args.mg)
 			if diff := cmp.Diff(tc.want, err, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ne.Connect(...): -want error, +got error:\n%s\n", tc.reason, diff)

@@ -23,6 +23,7 @@ import (
 )
 
 // A ProviderConfigSpec defines the desired state of a ProviderConfig.
+// +kubebuilder:validation:XValidation:rule="!has(self.tlsConfig) || (has(self.sslMode) && self.sslMode in ['verify-ca', 'verify-full'])",message="tlsConfig requires sslMode verify-ca or verify-full"
 type ProviderConfigSpec struct {
 	// Credentials required to authenticate to this provider.
 	Credentials ProviderCredentials `json:"credentials"`

@@ -40,11 +40,9 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	"github.com/crossplane-contrib/provider-sql/apis/cluster/postgresql/v1alpha1"
-	"github.com/crossplane-contrib/provider-sql/pkg/clients"
-	"github.com/crossplane-contrib/provider-sql/pkg/clients/awsiam"
 	"github.com/crossplane-contrib/provider-sql/pkg/clients/postgresql"
 	"github.com/crossplane-contrib/provider-sql/pkg/clients/xsql"
-	postgresqltls "github.com/crossplane-contrib/provider-sql/pkg/controller/postgresql/tls"
+	"github.com/crossplane-contrib/provider-sql/pkg/controller/cluster/postgresql/connect"
 )
 
 const (
@@ -52,8 +50,6 @@ const (
 	errGetPC        = "cannot get ProviderConfig"
 	errNoSecretRef  = "ProviderConfig does not reference a credentials Secret"
 	errGetSecret    = "cannot get credentials Secret"
-
-	errGenerateIAMToken = "cannot generate AWS IAM authentication token"
 
 	errNotGrant     = "managed resource is not a Grant custom resource"
 	errSelectGrant  = "cannot select grant"
@@ -82,10 +78,6 @@ const (
 	// Version-gated features must therefore not treat it as an old server.
 	versionUnknown = 0
 )
-
-// newIAMToken prepares a token provider used for every physical connection.
-// Tests replace this factory to avoid AWS access.
-var newIAMToken = awsiam.NewTokenProvider
 
 type connector struct {
 	kube  client.Client
@@ -136,24 +128,9 @@ func (c *connector) Connect(ctx context.Context, mg *v1alpha1.Grant) (managed.Ty
 	}
 	secretData := xsql.RemapCredentialKeys(s.Data, pc.Spec.Credentials.SecretKeyMapping.ToMap())
 
-	sslMode := clients.ToString(pc.Spec.SSLMode)
-	var password xsql.PasswordProvider
-	if pc.Spec.Credentials.Source == v1alpha1.CredentialsSourceAWSIAMAuth {
-		var err error
-		password, err = newIAMToken(ctx, pc.Spec.Credentials.Region, secretData)
-		if err != nil {
-			return nil, errors.Wrap(err, errGenerateIAMToken)
-		}
-		sslMode = postgresql.EnsureTLS(sslMode)
-	}
-
-	var caRef *xpv2.SecretKeySelector
-	if pc.Spec.TLSConfig != nil {
-		caRef = &pc.Spec.TLSConfig.CACert.SecretRef
-	}
-	sslMode, err := postgresqltls.LoadConfig(ctx, c.kube, "cluster/ProviderConfig/"+pc.Name, sslMode, string(secretData[xpv2.CredentialsSecretEndpointKey]), caRef)
+	sslMode, password, err := connect.Configure(ctx, c.kube, pc, secretData)
 	if err != nil {
-		return nil, errors.Wrap(err, "cannot configure PostgreSQL TLS")
+		return nil, err
 	}
 
 	xdb := c.newDB(secretData, connectDatabase(mg.Spec.ForProvider, pc.Spec.DefaultDatabase), sslMode, password)

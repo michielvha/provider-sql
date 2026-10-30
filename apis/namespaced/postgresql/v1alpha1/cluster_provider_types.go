@@ -23,6 +23,7 @@ import (
 )
 
 // A ClusterProviderConfigSpec defines the desired state of a ClusterProviderConfig.
+// +kubebuilder:validation:XValidation:rule="!has(self.tlsConfig) || (has(self.sslMode) && self.sslMode in ['verify-ca', 'verify-full'])",message="tlsConfig requires sslMode verify-ca or verify-full"
 type ClusterProviderConfigSpec struct {
 	// Credentials required to authenticate to this provider.
 	Credentials ClusterProviderCredentials `json:"credentials"`

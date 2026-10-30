@@ -148,7 +148,10 @@ func TestReloadWaiterCancellation(t *testing.T) {
 	defer cancel()
 	observed := &waitingContext{Context: ctx, waiting: make(chan struct{})}
 	done := make(chan error, 1)
-	go func() { _, err := r.load(observed, nil, "waiting", "verify-full", "db.example", nil); done <- err }()
+	go func() {
+		_, err := r.load(observed, nil, "waiting", "verify-full", "db.example", lifecycleRef())
+		done <- err
+	}()
 	select {
 	case <-observed.waiting:
 	case <-time.After(5 * time.Second):
@@ -326,5 +329,82 @@ func TestSelectorChangesFailClosed(t *testing.T) {
 			assertRegistered(t, next, false)
 			r.forget(identity)
 		})
+	}
+}
+
+func TestNoCAReconcileBypassesBusyRegistry(t *testing.T) {
+	r := newTLSRegistry()
+	if err := r.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer r.unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	mode, err := r.load(ctx, nil, "unused", "require", "db.example", nil)
+	if err != nil || mode != "require" {
+		t.Fatalf("no-CA reconcile waited behind the registry: mode=%q err=%v", mode, err)
+	}
+}
+
+func TestNoCAReconcilePreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := newTLSRegistry().load(ctx, nil, "unused", "verify-full", "db.example", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want cancellation, got %v", err)
+	}
+}
+
+func TestSelectorRemovalWaitsForFirstCARead(t *testing.T) {
+	r := newTLSRegistry()
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	ca := testCA(t)
+	kube := &test.MockClient{MockGet: func(_ context.Context, _ client.ObjectKey, object client.Object) error {
+		close(started)
+		<-release
+		object.(*corev1.Secret).Data = map[string][]byte{"bundle": ca}
+		return nil
+	}}
+	type result struct {
+		mode string
+		err  error
+	}
+	loaded := make(chan result, 1)
+	go func() {
+		mode, err := r.load(context.Background(), kube, "first-load", "verify-full", "db.example", lifecycleRef())
+		loaded <- result{mode, err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CA read did not start")
+	}
+	waiting := &waitingContext{Context: context.Background(), waiting: make(chan struct{})}
+	removed := make(chan result, 1)
+	go func() {
+		mode, err := r.load(waiting, nil, "first-load", "verify-full", "db.example", nil)
+		removed <- result{mode, err}
+	}()
+	select {
+	case <-waiting.waiting:
+	case result := <-removed:
+		t.Fatalf("selector removal bypassed an in-progress CA read: %+v", result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("selector removal did not reach the gate")
+	}
+	releaseOnce.Do(func() { close(release) })
+	first := <-loaded
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	next := <-removed
+	if next.err != nil || next.mode != "verify-full" {
+		t.Fatalf("selector removal: %+v", next)
+	}
+	assertRegistered(t, first.mode, false)
+	if len(r.entries) != 0 {
+		t.Fatal("removed selector retained its registration")
 	}
 }

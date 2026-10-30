@@ -7,7 +7,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 
 	"context"
-	"fmt"
 
 	"github.com/crossplane-contrib/provider-sql/apis/namespaced/mysql/v1alpha1"
 	"github.com/crossplane-contrib/provider-sql/pkg/clients/awsiam"
@@ -35,12 +34,13 @@ var newIAMToken = awsiam.NewTokenProvider
 
 func GetProviderConfig(ctx context.Context, kube client.Client, mg resource.ModernManaged) (ProviderInfo, error) {
 	var (
-		secretKey  *client.ObjectKey
-		tlsMode    *string
-		tlsConfig  *v1alpha1.TLSConfig
-		keyMapping map[string]string
-		source     v1alpha1.MySQLConnectionSecretSource
-		region     *string
+		secretKey      *client.ObjectKey
+		tlsMode        *string
+		tlsConfig      *v1alpha1.TLSConfig
+		keyMapping     map[string]string
+		source         v1alpha1.MySQLConnectionSecretSource
+		region         *string
+		configIdentity string
 	)
 
 	switch mg.GetProviderConfigReference().Kind {
@@ -65,6 +65,7 @@ func GetProviderConfig(ctx context.Context, kube client.Client, mg resource.Mode
 		keyMapping = providerConfig.Spec.Credentials.SecretKeyMapping.ToMap()
 		source = providerConfig.Spec.Credentials.Source
 		region = providerConfig.Spec.Credentials.Region
+		configIdentity = "ProviderConfig/" + providerConfig.Namespace + "/" + providerConfig.Name
 
 	case v1alpha1.ClusterProviderConfigKind:
 		clusterProviderConfig := &v1alpha1.ClusterProviderConfig{
@@ -86,6 +87,7 @@ func GetProviderConfig(ctx context.Context, kube client.Client, mg resource.Mode
 		keyMapping = clusterProviderConfig.Spec.Credentials.SecretKeyMapping.ToMap()
 		source = clusterProviderConfig.Spec.Credentials.Source
 		region = clusterProviderConfig.Spec.Credentials.Region
+		configIdentity = "ClusterProviderConfig/" + clusterProviderConfig.Name
 
 	default:
 		return ProviderInfo{}, errors.InvalidProviderConfigKindError(mg.GetProviderConfigReference().Kind)
@@ -118,7 +120,7 @@ func GetProviderConfig(ctx context.Context, kube client.Client, mg resource.Mode
 
 	return ProviderInfo{
 		PasswordProvider:   password,
-		ProviderConfigName: fmt.Sprintf("%s/%s/%s", mg.GetProviderConfigReference().Kind, mg.GetNamespace(), mg.GetProviderConfigReference().Name),
+		ProviderConfigName: configIdentity,
 		SecretData:         secretData,
 		TLS:                tlsMode,
 		TLSConfig:          tlsConfig,

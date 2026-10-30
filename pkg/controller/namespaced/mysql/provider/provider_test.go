@@ -121,3 +121,36 @@ func TestGetProviderConfigTLS(t *testing.T) {
 		}
 	}
 }
+
+func TestTLSRegistrationIdentityUsesConfigurationScope(t *testing.T) {
+	for _, tc := range []struct{ kind, namespace, want string }{
+		{v1alpha1.ClusterProviderConfigKind, "one", "ClusterProviderConfig/shared"},
+		{v1alpha1.ClusterProviderConfigKind, "two", "ClusterProviderConfig/shared"},
+		{v1alpha1.ProviderConfigKind, "one", "ProviderConfig/one/shared"},
+		{v1alpha1.ProviderConfigKind, "two", "ProviderConfig/two/shared"},
+	} {
+		t.Run(tc.kind+"/"+tc.namespace, func(t *testing.T) {
+			kube := &test.MockClient{MockGet: test.NewMockGetFn(nil, func(object client.Object) error {
+				switch pc := object.(type) {
+				case *v1alpha1.ProviderConfig:
+					pc.Spec.Credentials.Source = v1alpha1.CredentialsSourceMySQLConnectionSecret
+					pc.Spec.Credentials.ConnectionSecretRef = xpv2.LocalSecretReference{Name: "connection"}
+				case *v1alpha1.ClusterProviderConfig:
+					pc.Spec.Credentials.Source = v1alpha1.CredentialsSourceMySQLConnectionSecret
+					pc.Spec.Credentials.ConnectionSecretRef = xpv2.SecretReference{Name: "connection", Namespace: "trust"}
+				case *corev1.Secret:
+					pc.Data = map[string][]byte{}
+				}
+				return nil
+			})}
+			mg := &v1alpha1.Database{ObjectMeta: metav1.ObjectMeta{Namespace: tc.namespace}, Spec: v1alpha1.DatabaseSpec{ManagedResourceSpec: xpv2.ManagedResourceSpec{ProviderConfigReference: &xpv2.ProviderConfigReference{Kind: tc.kind, Name: "shared"}}}}
+			info, err := GetProviderConfig(context.Background(), kube, mg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.ProviderConfigName != tc.want {
+				t.Fatalf("registration identity: got %q, want %q", info.ProviderConfigName, tc.want)
+			}
+		})
+	}
+}

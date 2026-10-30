@@ -162,6 +162,10 @@ spec:
             required:
             - credentials
             type: object
+            x-kubernetes-validations:
+            - message: tlsConfig requires sslMode verify-ca or verify-full
+              rule: '!has(self.tlsConfig) || (has(self.sslMode) && self.sslMode in
+                [''verify-ca'', ''verify-full''])'
           status:
             description: A ClusterProviderConfigStatus reflects the observed state
               of a ClusterProviderConfig.

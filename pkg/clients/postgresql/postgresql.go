@@ -36,29 +36,27 @@ type postgresDB struct {
 // value of PGDATABASE, or if unset, the hardcoded string 'postgres'.
 // The sslmode defines the mode used to set up the connection for the provider.
 func New(creds map[string][]byte, database, sslmode string) xsql.DB {
-	endpoint := string(creds[xpv2.CredentialsSecretEndpointKey])
-	port := string(creds[xpv2.CredentialsSecretPortKey])
-	username := string(creds[xpv2.CredentialsSecretUserKey])
-	password := string(creds[xpv2.CredentialsSecretPasswordKey])
-	dsn := DSN(username, password, endpoint, port, database, connectionSSLMode(sslmode))
-
-	return postgresDB{
-		dsn:      dsn,
-		endpoint: endpoint,
-		port:     port,
-		sslmode:  sslmode,
-	}
+	return newPostgresDB(creds, database, sslmode, nil)
 }
 
 // NewWithPasswordProvider configures credentials generated for each physical connection.
 func NewWithPasswordProvider(creds map[string][]byte, database, sslmode string, password xsql.PasswordProvider) xsql.DB {
-	db := New(creds, database, sslmode).(postgresDB)
-	db.passwordProvider = password
-	if password != nil {
-		// Validate connection settings without including any credential in parser errors.
-		db.dsn = DSN(string(creds[xpv2.CredentialsSecretUserKey]), "", db.endpoint, db.port, database, connectionSSLMode(sslmode))
+	return newPostgresDB(creds, database, sslmode, password)
+}
+
+func newPostgresDB(creds map[string][]byte, database, sslmode string, passwordProvider xsql.PasswordProvider) postgresDB {
+	endpoint := string(creds[xpv2.CredentialsSecretEndpointKey])
+	port := string(creds[xpv2.CredentialsSecretPortKey])
+	username := string(creds[xpv2.CredentialsSecretUserKey])
+	password := string(creds[xpv2.CredentialsSecretPasswordKey])
+	if passwordProvider != nil {
+		// Parse connection settings without retaining a password in the DSN.
+		password = ""
 	}
-	return db
+	return postgresDB{
+		dsn:      DSN(username, password, endpoint, port, database, connectionSSLMode(sslmode)),
+		endpoint: endpoint, port: port, sslmode: sslmode, passwordProvider: passwordProvider,
+	}
 }
 
 func (c postgresDB) open() (*sql.DB, error) {
