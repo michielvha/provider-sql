@@ -68,6 +68,13 @@ func TestConnect(t *testing.T) {
 	errBoom := errors.New("boom")
 	nopUsage := func(ctx context.Context, mg resource.LegacyManaged) error { return nil }
 
+	// Keep this real-signing test independent of the developer's AWS configuration.
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "AWS_") {
+			t.Setenv(key, "")
+		}
+	}
 	for key, value := range map[string]string{
 		"AWS_ACCESS_KEY_ID": "SYNTHETIC-TEST-KEY", "AWS_SECRET_ACCESS_KEY": "synthetic-test-secret",
 		"AWS_SESSION_TOKEN": "synthetic-session", "AWS_REGION": "eu-central-1", "AWS_EC2_METADATA_DISABLED": "true",

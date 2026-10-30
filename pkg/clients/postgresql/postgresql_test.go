@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -100,5 +101,48 @@ func TestEnsureTLS(t *testing.T) {
 				t.Errorf("want %q, got %q", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestPasswordProviderConstructorDoesNotRetainStoredPassword(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "PG") {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	const stored = "STORED-PASSWORD-MUST-NOT-BE-RETAINED"
+	creds := map[string][]byte{
+		xpv2.CredentialsSecretEndpointKey: []byte("db.example"),
+		xpv2.CredentialsSecretPortKey:     []byte("5432"),
+		xpv2.CredentialsSecretUserKey:     []byte("user"),
+		xpv2.CredentialsSecretPasswordKey: []byte(stored),
+	}
+	calls := 0
+	password := func(context.Context) (string, error) { calls++; return "fresh-token", nil }
+	dynamic := newPostgresDB(creds, "postgres", "verify-full", password)
+	if strings.Contains(dynamic.dsn, stored) {
+		t.Fatal("dynamic connection retained the stored password in its DSN")
+	}
+	cfg, err := pq.NewConfig(dynamic.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Password != "" {
+		t.Fatal("dynamic connection parsed a retained password")
+	}
+	if calls != 0 || dynamic.passwordProvider == nil {
+		t.Fatal("constructor changed when passwords are generated")
+	}
+	static := newPostgresDB(creds, "postgres", "verify-full", nil)
+	cfg, err = pq.NewConfig(static.dsn)
+	if err != nil || cfg.Password != stored {
+		t.Fatalf("static password behavior changed: %v", err)
+	}
+	if string(creds[xpv2.CredentialsSecretPasswordKey]) != stored {
+		t.Fatal("constructor modified the caller's credentials")
 	}
 }
